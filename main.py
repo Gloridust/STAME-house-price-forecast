@@ -545,7 +545,7 @@ class TraditionalModels:
             
             # 计算指标
             mae = mean_absolute_error(y_test, y_pred)
-            rmse = mean_squared_error(y_test, y_pred, squared=False)
+            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
             r2 = r2_score(y_test, y_pred)
             
             results[name] = {
@@ -661,7 +661,7 @@ class Visualizer:
         
         # 添加性能指标
         mae = mean_absolute_error(y_true, y_pred)
-        rmse = mean_squared_error(y_true, y_pred, squared=False)
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
         r2 = r2_score(y_true, y_pred)
         
         plt.annotate(f'平均绝对误差 (MAE): {mae:.2f}\n均方根误差 (RMSE): {rmse:.2f}\nR² 分数: {r2:.2f}',
@@ -940,7 +940,7 @@ def train_full_pipeline():
     
     # 计算评估指标
     mae = mean_absolute_error(y_test, moe_predictions)
-    rmse = mean_squared_error(y_test, moe_predictions, squared=False)
+    rmse = np.sqrt(mean_squared_error(y_test, moe_predictions))
     r2 = r2_score(y_test, moe_predictions)
     
     print(f"混合专家模型 - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R2: {r2:.4f}")
