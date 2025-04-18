@@ -30,6 +30,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 import xgboost as xgb
 import lightgbm as lgb
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
+from scipy.spatial.distance import cdist
+import math
 
 # 配置设置
 warnings.filterwarnings('ignore')
@@ -38,6 +44,187 @@ plt.style.use('seaborn-v0_8-whitegrid')
 plt.rcParams['font.sans-serif'] = ['Hiragino Sans GB'] 
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 np.random.seed(42)
+
+# 设置设备
+device = torch.device("cpu")
+print(f"使用设备: {device}")
+
+# 简单的图数据结构
+class SimpleGraph:
+    """简化的图数据结构，替代 torch_geometric.data.Data"""
+    def __init__(self, x, edge_index):
+        self.x = x  # 节点特征
+        self.edge_index = edge_index  # 边索引 [2, num_edges]
+
+# 手动实现简化版 Mamba 状态空间模型
+class SimplifiedMamba(nn.Module):
+    """
+    简化版的 State Space Model，受 Mamba 启发
+    主要实现选择性状态空间建模的核心思想
+    """
+    def __init__(self, d_model, d_state=16, expand=2, dt_min=0.001, dt_max=0.1):
+        super().__init__()
+        self.d_model = d_model  # 输入维度
+        self.d_state = d_state  # 状态维度
+        self.expand_factor = expand  # 扩展因子
+        self.d_inner = int(d_model * expand)  # 扩展后的维度
+        
+        # 输入投影层
+        self.in_proj = nn.Linear(d_model, self.d_inner)
+        
+        # 门控机制
+        self.gate_proj = nn.Linear(d_model, self.d_inner)
+        
+        # S4 核心参数（离散化状态空间模型）
+        # 对⻆阵 A 的初始化采用 -log(j) 分布
+        log_timescale = torch.linspace(math.log(dt_min), math.log(dt_max), self.d_state)
+        self.A_log_scales = nn.Parameter(log_timescale.reshape(1, self.d_state))
+        
+        # B 和 C 会受输入影响变化
+        self.B_proj = nn.Linear(self.d_inner, self.d_state)
+        self.C_proj = nn.Linear(d_model, self.d_state)
+        
+        # 位置编码 (调整最大长度为更大值以适应可能的长序列)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 100, self.d_model))  # 最大长度假设为100
+        
+        # 输出投影层
+        self.out_proj = nn.Linear(self.d_inner, d_model)
+    
+    def discretize(self, dt):
+        """A和B矩阵的离散化"""
+        # 使用零阶保持 (ZOH) 方法，简化版
+        # A_discrete = exp(A * dt)
+        A_discrete = torch.exp(dt * torch.exp(self.A_log_scales))
+        return A_discrete
+    
+    def forward(self, x):
+        batch_size, seq_len, _ = x.shape
+        
+        # 添加位置编码 (确保位置编码长度足够)
+        pos_emb = self.pos_embedding[:, :seq_len, :]
+        x = x + pos_emb
+        
+        # 投影到更高维空间
+        x_proj = self.in_proj(x)  # [B, L, D_inner]
+        
+        # 计算选择性注意力 (门控)
+        gate = torch.sigmoid(self.gate_proj(x))  # [B, L, D_inner]
+        x_gated = x_proj * gate  # 应用门控
+        
+        # 状态空间参数
+        B = self.B_proj(x_gated)  # [B, L, D_state]
+        C = self.C_proj(x)  # [B, L, D_state]
+        
+        # 固定时间步长 (简化)
+        dt = torch.ones(batch_size, 1, device=x.device) * 0.01
+        A_discrete = self.discretize(dt)  # [B, D_state]
+        
+        # 状态递推 (简化的 SSM)
+        # 注：这是一个序列化执行，真正的 Mamba 使用更高效的并行计算
+        h = torch.zeros(batch_size, self.d_state, device=x.device)
+        outputs = []
+        
+        for t in range(seq_len):
+            # 状态更新: h_t = A_t * h_{t-1} + B_t * x_t
+            h = A_discrete * h + B[:, t, :]
+            # 输出: y_t = C_t * h_t
+            y = h * C[:, t, :]  # 简化的输出计算
+            outputs.append(y)
+        
+        # 组合所有时间步的输出 [B, L, D_state]
+        output_stacked = torch.stack(outputs, dim=1)
+        
+        # 投影回原始维度 (先扩展到内部维度)
+        output_expanded = torch.zeros(batch_size, seq_len, self.d_inner, device=x.device)
+        d_state_slice = min(self.d_state, self.d_inner)
+        output_expanded[:, :, :d_state_slice] = output_stacked[:, :, :d_state_slice]
+        
+        # 最终投影到模型输出维度
+        output = self.out_proj(output_expanded)  # [B, L, D_model]
+        
+        return output
+
+# 手动实现简化版图注意力层，替代 GATConv
+class SimpleGATLayer(nn.Module):
+    """
+    简化版的图注意力层，受GAT (Graph Attention Networks) 启发
+    """
+    def __init__(self, in_features, out_features, heads=1, concat=True, dropout=0.2):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.heads = heads
+        self.concat = concat
+        self.dropout = dropout
+        
+        # 特征转换矩阵
+        self.W = nn.Parameter(torch.Tensor(heads, in_features, out_features))
+        
+        # 注意力参数
+        self.a = nn.Parameter(torch.Tensor(heads, 2 * out_features))
+        
+        # 初始化参数
+        nn.init.xavier_uniform_(self.W)
+        nn.init.xavier_uniform_(self.a)
+        
+        # Dropout
+        self.dropout_layer = nn.Dropout(dropout)
+        
+        # LeakyReLU
+        self.leakyrelu = nn.LeakyReLU(0.2)
+    
+    def forward(self, x, adj_matrix):
+        """
+        x: 节点特征矩阵 [N, in_features]
+        adj_matrix: 邻接矩阵 [N, N]
+        """
+        N = x.size(0)  # 节点数量
+        
+        # 对每个注意力头应用线性变换
+        x_transformed = torch.stack([torch.mm(x, self.W[h]) for h in range(self.heads)])  # [heads, N, out_features]
+        
+        # 准备注意力计算所需的节点对特征
+        a_input = torch.zeros(self.heads, N, N, 2 * self.out_features, device=x.device)
+        
+        # 对所有节点对计算注意力
+        for h in range(self.heads):
+            for i in range(N):
+                for j in range(N):
+                    if adj_matrix[i, j] > 0:  # 仅计算邻接节点的注意力
+                        a_input[h, i, j] = torch.cat([x_transformed[h, i], x_transformed[h, j]], dim=0)
+        
+        # 计算注意力系数
+        e = torch.zeros(self.heads, N, N, device=x.device)
+        for h in range(self.heads):
+            for i in range(N):
+                for j in range(N):
+                    if adj_matrix[i, j] > 0:
+                        e[h, i, j] = self.leakyrelu(torch.sum(a_input[h, i, j] * self.a[h]))
+        
+        # 应用邻接矩阵掩码
+        adj_mask = (adj_matrix == 0).unsqueeze(0).expand(self.heads, -1, -1)
+        e.masked_fill_(adj_mask, float('-inf'))
+        
+        # 对邻域内的节点应用softmax
+        attention = F.softmax(e, dim=2)  # [heads, N, N]
+        attention = self.dropout_layer(attention)  # [heads, N, N]
+        
+        # 计算每个节点的输出特征
+        h_prime = torch.zeros(self.heads, N, self.out_features, device=x.device)
+        for h in range(self.heads):
+            for i in range(N):
+                # 对邻域内的节点特征进行加权求和
+                for j in range(N):
+                    if adj_matrix[i, j] > 0:
+                        h_prime[h, i] += attention[h, i, j] * x_transformed[h, j]
+        
+        # 合并或平均多头注意力结果
+        if self.concat:
+            # 在特征维度上连接
+            return h_prime.transpose(0, 1).reshape(N, self.heads * self.out_features)
+        else:
+            # 在多头之间取平均
+            return h_prime.mean(dim=0)
 
 # 生成经纬度信息
 CITY_COORDS = {
@@ -230,6 +417,10 @@ class DataProcessor:
         # 特征工程
         X, y = self._feature_engineering(data)
         
+        if test_size == 0 and validation_size == 0:
+            # 不分割数据，直接返回
+            return X, y, data
+        
         # 数据分割
         X_temp, X_test, y_temp, y_test = train_test_split(
             X, y, test_size=test_size, random_state=42
@@ -295,6 +486,28 @@ class DataProcessor:
         
         return df
     
+    def _calculate_adjacency(self, k=5):
+        """计算城市的邻接矩阵 (基于距离的KNN)"""
+        cities = list(self.city_coords.keys())
+        coords = np.array([self.city_coords[city] for city in cities])
+        
+        # 计算距离矩阵 (Haversine or Euclidean - Euclidean is simpler here)
+        dist_matrix = cdist(coords, coords)
+        
+        # 创建邻接矩阵 (0-1矩阵)
+        adj = np.zeros((len(cities), len(cities)))
+        for i in range(len(cities)):
+            # 找到最近的 k 个邻居 (不包括自身)
+            nearest_indices = np.argsort(dist_matrix[i, :])[1:k+1]
+            adj[i, nearest_indices] = 1
+            adj[nearest_indices, i] = 1 # 保持对称
+
+        # 创建边索引 (用于兼容新的 SimpleGATLayer)
+        edge_index = np.array(np.where(adj > 0))
+        edge_index = torch.tensor(edge_index, dtype=torch.long)
+        
+        return adj, edge_index, cities
+
     def _feature_engineering(self, data:pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
         """
         特征工程
@@ -400,7 +613,77 @@ class DataProcessor:
         # 保存数据副本以供后续分析
         self.processed_data = df
         
+        # 计算图邻接信息
+        self.adj_matrix, self.edge_index, self.city_list_for_graph = self._calculate_adjacency()
+        # 创建城市名称到图节点索引的映射
+        self.city_to_graph_idx = {city: i for i, city in enumerate(self.city_list_for_graph)}
+
+        # 在 processed_data 中添加图节点索引，方便后续查找
+        self.processed_data['graph_node_idx'] = self.processed_data['城市'].map(self.city_to_graph_idx)
+
         return X, y
+
+    def get_graph_data(self):
+        """获取图结构和初始节点特征"""
+        if not hasattr(self, 'edge_index'):
+            raise ValueError("需要先运行 _feature_engineering 来计算图信息")
+
+        # 使用城市级别的平均特征作为 GAT 的初始节点特征
+        # 注意：这里选择的特征需要不包含时序信息，主要反映城市自身属性
+        city_features_df = self.processed_data.groupby('城市').agg(
+            latitude=('latitude', 'mean'),
+            longitude=('longitude', 'mean'),
+            province_code=('province_code', 'first'), # 假设省份不变
+            # 可以添加更多非时序的城市级特征
+            # city_mean_price=('city_mean_price', 'first'), # 使用第一次计算的均值
+        ).reset_index()
+
+        # 确保顺序与 city_list_for_graph 一致
+        city_features_df = city_features_df.set_index('城市').loc[self.city_list_for_graph].reset_index()
+
+        # 选择数值特征并进行标准化
+        node_feature_cols = ['latitude', 'longitude', 'province_code'] # 添加更多特征
+        node_features_raw = city_features_df[node_feature_cols].values.astype(np.float32)
+        
+        # 标准化节点特征
+        node_scaler = StandardScaler()
+        node_features_scaled = node_scaler.fit_transform(node_features_raw)
+        
+        x = torch.tensor(node_features_scaled, dtype=torch.float).to(device)
+        
+        # 创建邻接矩阵用于新的 SimpleGATLayer
+        adj_matrix = torch.tensor(self.adj_matrix, dtype=torch.float).to(device)
+
+        return SimpleGraph(x=x, edge_index=self.edge_index.to(device)), adj_matrix
+
+    def get_temporal_data(self):
+        """准备 Mamba 需要的时间序列数据"""
+        # 选择时间相关的特征 + 目标变量（用于训练Mamba，虽然这里只用它提取特征）
+        temporal_cols = [
+            'year_norm', 'year_trend', 'year_cycle_sin', 'year_cycle_cos',
+            'city_to_province_ratio', 'city_to_national_ratio',
+            '价格' # 包含价格本身作为输入序列的一部分
+        ]
+        # 还需要城市标识来分组
+        df_temporal = self.processed_data[['城市', '年份'] + temporal_cols].copy()
+        df_temporal = df_temporal.sort_values(['城市', '年份'])
+
+        # 按城市分组，创建序列
+        sequences = []
+        city_order = [] # 记录序列对应的城市顺序
+        for city, group in df_temporal.groupby('城市'):
+            # 填充缺失值（如果需要）
+            group = group.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            sequences.append(torch.tensor(group[temporal_cols].values, dtype=torch.float))
+            city_order.append(city)
+
+        # 对序列进行填充，使长度一致
+        padded_sequences = pad_sequence(sequences, batch_first=True, padding_value=0.0).to(device)
+
+        # 创建城市到序列索引的映射
+        city_to_seq_idx = {city: i for i, city in enumerate(city_order)}
+
+        return padded_sequences, city_order, city_to_seq_idx
 
 
 class TimeSpaceFeatureEnhancer:
@@ -910,6 +1193,56 @@ class Visualizer:
         plt.close()
 
 
+class SpatioTemporalModel(nn.Module):
+    """结合类 Mamba 和类 GAT 的时空模型"""
+    def __init__(self, temporal_input_dim, mamba_dim, gat_node_dim, gat_hidden_dim, gat_output_dim, num_gat_layers=2, gat_heads=4):
+        super().__init__()
+        self.mamba_dim = mamba_dim
+        self.gat_output_dim = gat_output_dim
+
+        # 时间模型 (Mamba)
+        self.mamba = SimplifiedMamba(
+            d_model=temporal_input_dim, # 输入维度
+            d_state=16,  # Mamba 状态维度 (可调)
+            expand=2,    # Mamba 扩展因子 (可调)
+        ).to(device)
+        # 添加一个线性层将 Mamba 输出调整到期望维度
+        self.mamba_fc = nn.Linear(temporal_input_dim, mamba_dim).to(device) # Mamba 输出维度等于输入维度，需调整
+
+        # 空间模型 (GAT) - 使用我们自己的 SimpleGATLayer
+        self.gat_layers = nn.ModuleList()
+        self.gat_layers.append(SimpleGATLayer(gat_node_dim, gat_hidden_dim, heads=gat_heads, concat=True, dropout=0.2).to(device))
+        for _ in range(num_gat_layers - 2):
+            self.gat_layers.append(SimpleGATLayer(gat_hidden_dim * gat_heads, gat_hidden_dim, heads=gat_heads, concat=True, dropout=0.2).to(device))
+        self.gat_layers.append(SimpleGATLayer(gat_hidden_dim * gat_heads, gat_output_dim, heads=1, concat=False, dropout=0.2).to(device)) # 输出层
+        self.gat_dropout = nn.Dropout(p=0.2) # Dropout 减少过拟合
+
+    def forward(self, temporal_data, graph_data, adj_matrix):
+        """
+        Args:
+            temporal_data: (batch_size=num_cities, seq_len, temporal_input_dim) - Mamba 的输入序列
+            graph_data: SimpleGraph - 包含 x (节点特征) 和 edge_index
+            adj_matrix: 邻接矩阵 [N, N]
+        """
+        # --- Mamba 处理时间序列 ---
+        # Mamba 模型需要 (batch, length, dim)
+        # Mamba 输出维度通常等于输入维度 d_model
+        mamba_output = self.mamba(temporal_data) # shape: (batch, length, d_model)
+        mamba_features = self.mamba_fc(mamba_output) # shape: (batch, length, mamba_dim)
+
+        # --- GAT 处理空间图 ---
+        x = graph_data.x
+        for i, layer in enumerate(self.gat_layers):
+            x = self.gat_dropout(x) # Apply dropout before GAT layer
+            x = layer(x, adj_matrix)
+            if i < len(self.gat_layers) - 1: # Apply activation for hidden layers
+                x = F.relu(x)
+        # x shape: (num_nodes=num_cities, gat_output_dim)
+        gat_features_per_city = x
+
+        return mamba_features, gat_features_per_city
+
+
 def train_full_pipeline():
     """
     完整训练流程
@@ -926,10 +1259,9 @@ def train_full_pipeline():
     # 1. 加载和处理数据
     data_processor = DataProcessor()
     files = ['data/58_20102024.csv', 'data/anjuke_20152024.csv']
-    
-    # 尝试加载数据，如果文件不存在则使用示例数据
     try:
-        (X_train, y_train), (X_val, y_val), (X_test, y_test) = data_processor.load_data(files)
+        # 不分割数据，获取原始特征和完整数据
+        X_base_all, y_all, df_processed = data_processor.load_data(files, validation_size=0, test_size=0)
     except FileNotFoundError:
         print("警告：未找到指定的数据文件，使用示例数据...")
         
@@ -946,90 +1278,135 @@ def train_full_pipeline():
         example_data.to_csv('data/example_data.csv', index=False)
         
         # 处理示例数据
-        (X_train, y_train), (X_val, y_val), (X_test, y_test) = data_processor.load_data(['data/example_data.csv'])
+        X_base_all, y_all, df_processed = data_processor.load_data(['data/example_data.csv'], validation_size=0, test_size=0)
     
-    # 2. 添加时空特征增强
-    print("\n添加时空特征增强...")
-    enhancer = TimeSpaceFeatureEnhancer(data_processor)
-    enhancer.fit(X_train, y_train)
     
-    X_train_enhanced = enhancer.transform(X_train)
-    X_val_enhanced = enhancer.transform(X_val)
-    X_test_enhanced = enhancer.transform(X_test)
-    
-    # 3. 训练传统模型
-    print("\n训练传统模型...")
+    # 2. 准备高级模型输入
+    print("\n准备时空模型输入...")
+    graph_data, adj_matrix = data_processor.get_graph_data()
+    temporal_sequences, city_order, city_to_seq_idx = data_processor.get_temporal_data()
+
+    # 3. 初始化并运行 SpatioTemporalModel (仅特征提取，不训练)
+    print("\n运行 SpatioTemporalModel 提取特征...")
+    temporal_input_dim = temporal_sequences.shape[-1]
+    mamba_dim = 64 # 可调
+    gat_node_dim = graph_data.x.shape[-1]
+    gat_hidden_dim = 64 # 可调
+    gat_output_dim = 64 # 可调
+
+    st_model = SpatioTemporalModel(
+        temporal_input_dim=temporal_input_dim,
+        mamba_dim=mamba_dim,
+        gat_node_dim=gat_node_dim,
+        gat_hidden_dim=gat_hidden_dim,
+        gat_output_dim=gat_output_dim
+    ).to(device)
+    st_model.eval() # 设置为评估模式，因为我们只用它提取特征
+
+    with torch.no_grad(): # 不计算梯度
+        mamba_features_padded, gat_features_per_city = st_model(temporal_sequences, graph_data, adj_matrix)
+
+    # 4. 组合特征
+    print("\n组合基础特征和增强特征...")
+    # 将 Mamba 和 GAT 特征映射回原始 DataFrame 的每一行
+    enhanced_features_list = []
+    for index, row in df_processed.iterrows():
+        city = row['城市']
+        
+        # 找到年份在序列中的位置
+        city_data = df_processed[df_processed['城市'] == city]
+        year_index_in_seq = np.where(city_data['年份'].values == row['年份'])[0][0]
+        
+        if city in city_to_seq_idx:
+            seq_idx = city_to_seq_idx[city]
+            # 获取对应的 Mamba 特征
+            mamba_feat = mamba_features_padded[seq_idx, year_index_in_seq, :].cpu().numpy()
+        else:
+            mamba_feat = np.zeros(mamba_dim) # 城市未在序列中
+
+        if city in data_processor.city_to_graph_idx:
+            graph_node_idx = data_processor.city_to_graph_idx[city]
+            gat_feat = gat_features_per_city[graph_node_idx, :].cpu().numpy()
+        else:
+            gat_feat = np.zeros(gat_output_dim) # 城市未在图中
+
+        enhanced_features_list.append(np.concatenate([mamba_feat, gat_feat]))
+
+    enhanced_features_df = pd.DataFrame(enhanced_features_list, index=X_base_all.index)
+    enhanced_features_df.columns = [f'mamba_{i}' for i in range(mamba_dim)] + [f'gat_{i}' for i in range(gat_output_dim)]
+
+    # 合并基础特征和增强特征
+    X_enhanced_all = pd.concat([X_base_all, enhanced_features_df], axis=1)
+    feature_names_enhanced = list(X_enhanced_all.columns) # 更新特征名列表
+
+    # 5. 数据分割 (现在对增强后的特征进行分割)
+    print("\n分割数据...")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_enhanced_all, y_all, test_size=0.1, random_state=42 # 简单分割，暂无验证集
+    )
+
+    # 6. 训练传统模型 (使用增强特征)
+    print("\n训练传统模型 (使用增强特征)...")
     traditional_models = TraditionalModels()
     traditional_results = traditional_models.train_and_evaluate(
-        X_train_enhanced, y_train,
-        X_test_enhanced, y_test
+        X_train, y_train, X_test, y_test # 使用增强后的X_train, X_test
     )
-    
-    # 获取最佳传统模型
     best_model_name, best_model_result = traditional_models.get_best_model()
     print(f"\n最佳传统模型: {best_model_name}")
     print(f"MAE: {best_model_result['mae']:.4f}, RMSE: {best_model_result['rmse']:.4f}, R2: {best_model_result['r2']:.4f}")
-    
-    # 绘制特征重要性
-    feature_names = list(X_train_enhanced.columns)
-    feature_importance = traditional_models.get_feature_importance(best_model_name, feature_names)
+
+    # 绘制特征重要性 (使用新的特征名)
+    feature_importance = traditional_models.get_feature_importance(best_model_name, feature_names_enhanced)
     if feature_importance is not None:
-        Visualizer.plot_feature_importance(feature_importance, filename='result/best_traditional_feature_importance.png')
-    
-    # 4. 训练混合专家模型
-    print("\n训练混合专家模型...")
-    moe_model = MixtureOfExpertsModel()
-    moe_model.fit(X_train_enhanced, y_train)
-    
-    # 5. 在测试集上评估
+        Visualizer.plot_feature_importance(feature_importance, filename='result/best_traditional_feature_importance_enhanced.png')
+
+    # 7. 训练混合专家模型 (使用增强特征)
+    print("\n训练混合专家模型 (使用增强特征)...")
+    moe_model = MixtureOfExpertsModel() # 注意：这里的MoE仍然使用传统模型作为专家
+    moe_model.fit(X_train, y_train) # 使用增强后的X_train
+
+    # 8. 在测试集上评估 MoE
     print("\n在测试集上评估混合专家模型...")
-    moe_predictions, expert_weights = moe_model.predict(X_test_enhanced)
-    
+    moe_predictions, expert_weights = moe_model.predict(X_test) # 使用增强后的X_test
+
     # 计算评估指标
     mae = mean_absolute_error(y_test, moe_predictions)
     rmse = np.sqrt(mean_squared_error(y_test, moe_predictions))
     r2 = r2_score(y_test, moe_predictions)
-    
     print(f"混合专家模型 - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R2: {r2:.4f}")
-    
-    # 绘制预测对比
-    Visualizer.plot_predictions(y_test, moe_predictions, "混合专家模型预测", filename='result/our_model_predictions.png')
-    Visualizer.plot_predictions(y_test, best_model_result['predictions'], f"{best_model_name}预测", filename='result/best_traditional_model_predictions.png')
-    
+
+    # 绘制预测对比 (MoE 和 最佳传统模型)
+    Visualizer.plot_predictions(y_test, moe_predictions, "混合专家模型预测 (增强特征)", filename='result/moe_model_predictions_enhanced.png')
+    Visualizer.plot_predictions(y_test, best_model_result['predictions'], f"{best_model_name}预测 (增强特征)", filename='result/best_traditional_model_predictions_enhanced.png')
+
     # 绘制专家权重分布
     Visualizer.plot_expert_weights(expert_weights, moe_model.get_model_names(), filename='result/expert_weights.png')
-    
-    # 6. 模型比较
+
+    # 9. 模型比较
     print("\n模型比较...")
-    
-    # 将我们的模型结果添加到比较中
-    all_results = {**traditional_results, '时空注意力混合专家模型': {
+    all_results = {**traditional_results, '混合专家模型 (增强特征)': {
         'mae': mae,
         'rmse': rmse,
         'r2': r2
     }}
-    
-    Visualizer.plot_model_comparison(all_results, filename='result/model_comparison.png')
-    
-    # 7. 额外可视化
+    Visualizer.plot_model_comparison(all_results, filename='result/model_comparison_enhanced.png')
+
+    # 10. 额外可视化 (使用 data_processor.processed_data)
     print("\n创建额外可视化...")
-    
-    # 绘制价格趋势
     Visualizer.plot_price_trends(data_processor.processed_data, filename='result/price_trends.png')
-    
-    # 绘制最新年份的地理分布
     latest_year = data_processor.processed_data['年份'].max()
     Visualizer.plot_geographic_prices(data_processor.processed_data, latest_year, filename=f'result/geographic_prices_{latest_year}.png')
-    
+
     print("\n训练和评估完成！")
-    
+
     return {
         'data_processor': data_processor,
         'traditional_models': traditional_models,
         'moe_model': moe_model,
+        'st_model': st_model,
         'best_traditional_model': best_model_name,
         'traditional_results': traditional_results,
-        'our_model_results': {
+        'moe_model_results': {
             'mae': mae,
             'rmse': rmse,
             'r2': r2
@@ -1049,7 +1426,7 @@ def main():
     
     # 打印总结
     traditional_r2 = results['traditional_results'][results['best_traditional_model']]['r2']
-    our_model_r2 = results['our_model_results']['r2']
+    our_model_r2 = results['moe_model_results']['r2']
     improvement = (our_model_r2 - traditional_r2) / traditional_r2 * 100
     
     print("\n=== 模型比较总结 ===")
