@@ -1,0 +1,63 @@
+使用设备: cpu
+=== 房价预测模型：时空注意力混合专家模型（简化版）===
+作者: Claude AI
+日期: 2025-04-15
+
+
+启动完整训练流程...
+已创建/确认 'result' 文件夹用于保存图片。
+加载数据完成，共 6564 条记录
+检测到 528 个异常值 (8.05%)
+
+准备时空模型输入...
+
+运行 SpatioTemporalModel 提取特征...
+
+组合基础特征和增强特征...
+
+分割数据...
+
+训练传统模型 (使用增强特征)...
+训练模型: Linear Regression...
+Linear Regression - MAE: 648.2180, RMSE: 1088.6766, R2: 0.9624
+训练模型: Ridge...
+Ridge - MAE: 645.8109, RMSE: 1091.9778, R2: 0.9622
+训练模型: Random Forest...
+Random Forest - MAE: 213.4432, RMSE: 514.3709, R2: 0.9916
+训练模型: Gradient Boosting...
+Gradient Boosting - MAE: 449.5737, RMSE: 732.8502, R2: 0.9830
+训练模型: XGBoost...
+XGBoost - MAE: 240.3381, RMSE: 577.5145, R2: 0.9894
+训练模型: LightGBM...
+[LightGBM] [Info] Auto-choosing col-wise multi-threading, the overhead of testing was 0.003188 seconds.
+You can set `force_col_wise=true` to remove the overhead.
+[LightGBM] [Info] Total Bins 22773
+[LightGBM] [Info] Number of data points in the train set: 5905, number of used features: 143
+[LightGBM] [Info] Start training from score 8009.552244
+LightGBM - MAE: 323.6059, RMSE: 638.1626, R2: 0.9871
+
+最佳传统模型: Random Forest
+MAE: 213.4432, RMSE: 514.3709, R2: 0.9916
+
+训练混合专家模型 (使用增强特征)...
+[LightGBM] [Info] Auto-choosing col-wise multi-threading, the overhead of testing was 0.002857 seconds.
+You can set `force_col_wise=true` to remove the overhead.
+[LightGBM] [Info] Total Bins 22773
+[LightGBM] [Info] Number of data points in the train set: 5905, number of used features: 143
+[LightGBM] [Info] Start training from score 8009.552244
+
+在测试集上评估混合专家模型...
+混合专家模型 - MAE: 176.6216, RMSE: 448.3625, R2: 0.9936
+
+模型比较...
+
+创建额外可视化...
+
+训练和评估完成！
+
+=== 模型比较总结 ===
+最佳传统模型: Random Forest, R²: 0.9916
+我们的模型: 时空注意力混合专家模型, R²: 0.9936
+性能提升: 0.2031%
+
+完成！所有结果已保存到当前目录。
