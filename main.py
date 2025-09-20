@@ -15,6 +15,7 @@ import os
 import warnings
 import json
 import pickle
+import argparse
 from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 import pandas as pd
@@ -40,8 +41,111 @@ import math
 # 配置设置
 warnings.filterwarnings('ignore')
 plt.style.use('seaborn-v0_8-whitegrid')
+
+# 全局语言设置
+USE_ENGLISH = False
+
+# 中英文标签映射字典
+LABELS = {
+    'zh': {
+        'title_house_price_prediction': '房价预测模型 - 时空注意力混合专家模型',
+        'title_model_comparison': '模型性能比较',
+        'title_predictions': '预测结果对比',
+        'title_feature_importance': '特征重要性分析',
+        'title_expert_weights': '专家模型权重分布',
+        'title_price_trends': '主要城市房价趋势',
+        'title_geographic_prices': '地理分布房价',
+        'title_mae_comparison': '平均绝对误差比较',
+        'title_rmse_comparison': '均方根误差比较',
+        'title_r2_comparison': 'R² 分数比较',
+        'xlabel_actual_price': '实际价格',
+        'ylabel_predicted_price': '预测价格',
+        'xlabel_year': '年份',
+        'ylabel_price': '价格 (万元/平方米)',
+        'xlabel_model': '模型',
+        'ylabel_r2_score': 'R² 分数',
+        'ylabel_r2': 'R² 分数',
+        'ylabel_mae': '平均绝对误差 (MAE)',
+        'ylabel_rmse': '均方根误差 (RMSE)',
+        'xlabel_feature': '特征',
+        'ylabel_importance': '重要性',
+        'xlabel_expert': '专家模型',
+        'ylabel_weight': '权重',
+        'xlabel_longitude': '经度',
+        'ylabel_latitude': '纬度',
+        'legend_actual': '实际值',
+        'legend_predicted': '预测值',
+        'colorbar_price': '价格 (万元/平方米)',
+        'text_r2': 'R² = {:.4f}',
+        'text_mae': 'MAE = {:.4f}',
+        'text_rmse': 'RMSE = {:.4f}',
+        'device_info': '使用设备: {}',
+        'loading_data': '加载数据完成，共 {} 条记录',
+        'outliers_detected': '检测到 {} 个异常值 ({:.2f}%)',
+        'model_summary': '模型比较总结',
+        'best_traditional': '最佳传统模型: {}, R²: {:.4f}',
+        'our_model': '我们的模型: 时空注意力混合专家模型, R²: {:.4f}',
+        'improvement': '性能提升: {:.4f}%',
+        'complete': '完成！所有结果已保存到当前目录。'
+    },
+    'en': {
+        'title_house_price_prediction': 'House Price Prediction - Spatio-Temporal Attention Mixture of Experts',
+        'title_model_comparison': 'Model Performance Comparison',
+        'title_predictions': 'Prediction Results Comparison',
+        'title_feature_importance': 'Feature Importance Analysis',
+        'title_expert_weights': 'Expert Model Weight Distribution',
+        'title_price_trends': 'Price Trends of Major Cities',
+        'title_geographic_prices': 'Geographic Price Distribution',
+        'title_mae_comparison': 'Mean Absolute Error Comparison',
+        'title_rmse_comparison': 'Root Mean Square Error Comparison',
+        'title_r2_comparison': 'R² Score Comparison',
+        'xlabel_actual_price': 'Actual Price',
+        'ylabel_predicted_price': 'Predicted Price',
+        'xlabel_year': 'Year',
+        'ylabel_price': 'Price (10k CNY/sqm)',
+        'xlabel_model': 'Model',
+        'ylabel_r2_score': 'R² Score',
+        'ylabel_r2': 'R² Score',
+        'ylabel_mae': 'Mean Absolute Error (MAE)',
+        'ylabel_rmse': 'Root Mean Square Error (RMSE)',
+        'xlabel_feature': 'Feature',
+        'ylabel_importance': 'Importance',
+        'xlabel_expert': 'Expert Model',
+        'ylabel_weight': 'Weight',
+        'xlabel_longitude': 'Longitude',
+        'ylabel_latitude': 'Latitude',
+        'legend_actual': 'Actual',
+        'legend_predicted': 'Predicted',
+        'colorbar_price': 'Price (10k CNY/sqm)',
+        'text_r2': 'R² = {:.4f}',
+        'text_mae': 'MAE = {:.4f}',
+        'text_rmse': 'RMSE = {:.4f}',
+        'device_info': 'Using device: {}',
+        'loading_data': 'Data loading completed, {} records in total',
+        'outliers_detected': 'Detected {} outliers ({:.2f}%)',
+        'model_summary': 'Model Comparison Summary',
+        'best_traditional': 'Best Traditional Model: {}, R²: {:.4f}',
+        'our_model': 'Our Model: Spatio-Temporal Attention MoE, R²: {:.4f}',
+        'improvement': 'Performance Improvement: {:.4f}%',
+        'complete': 'Complete! All results saved to current directory.'
+    }
+}
+
+def get_label(key):
+    """获取对应语言的标签"""
+    lang = 'en' if USE_ENGLISH else 'zh'
+    return LABELS[lang].get(key, key)
+
+def get_filename(base_filename):
+    """根据语言设置生成文件名"""
+    if USE_ENGLISH:
+        # 将 result/ 替换为 result_en/
+        return base_filename.replace('result/', 'result_en/')
+    return base_filename
+
 # 设置中文字体 (macOS 示例，请确保你系统中有此字体，或替换为其他可用中文字体如 'PingFang SC')
-plt.rcParams['font.sans-serif'] = ['Hiragino Sans GB'] 
+if not USE_ENGLISH:
+    plt.rcParams['font.sans-serif'] = ['Hiragino Sans GB'] 
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 np.random.seed(42)
 
@@ -967,7 +1071,7 @@ class Visualizer:
     @staticmethod
     def plot_predictions(y_true, y_pred, title, filename='result/predictions.png'):
         """
-        绘制预测对比图
+        绘制预测结果对比图
         
         Args:
             y_true: 真实值
@@ -975,6 +1079,7 @@ class Visualizer:
             title: 图表标题
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         plt.figure(figsize=(10, 6))
         
         plt.scatter(y_true, y_pred, alpha=0.5)
@@ -984,8 +1089,8 @@ class Visualizer:
         max_val = max(np.max(y_true), np.max(y_pred))
         plt.plot([min_val, max_val], [min_val, max_val], 'r--')
         
-        plt.xlabel('实际价格')
-        plt.ylabel('预测价格')
+        plt.xlabel(get_label('xlabel_actual_price'))
+        plt.ylabel(get_label('ylabel_predicted_price'))
         plt.title(title)
         plt.grid(True)
         
@@ -994,7 +1099,11 @@ class Visualizer:
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
         r2 = r2_score(y_true, y_pred)
         
-        plt.annotate(f'平均绝对误差 (MAE): {mae:.2f}\n均方根误差 (RMSE): {rmse:.2f}\nR² 分数: {r2:.2f}',
+        mae_text = get_label('text_mae').format(mae)
+        rmse_text = get_label('text_rmse').format(rmse)
+        r2_text = get_label('text_r2').format(r2)
+        
+        plt.annotate(f'{mae_text}\n{rmse_text}\n{r2_text}',
                      xy=(0.05, 0.95), xycoords='axes fraction',
                      bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
@@ -1007,12 +1116,13 @@ class Visualizer:
     @staticmethod
     def plot_model_comparison(results, filename='result/model_comparison.png'):
         """
-        绘制模型比较图
+        绘制模型性能比较图
         
         Args:
-            results: 模型评估结果字典
+            results: 模型结果字典
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         models = list(results.keys())
         mae_values = [results[model]['mae'] for model in models]
         rmse_values = [results[model]['rmse'] for model in models]
@@ -1023,24 +1133,24 @@ class Visualizer:
         # MAE比较
         plt.subplot(3, 1, 1)
         plt.bar(models, mae_values, color='skyblue')
-        plt.ylabel('平均绝对误差 (MAE)')
-        plt.title('平均绝对误差比较')
+        plt.ylabel(get_label('ylabel_mae'))
+        plt.title(get_label('title_mae_comparison'))
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y')
         
         # RMSE比较
         plt.subplot(3, 1, 2)
         plt.bar(models, rmse_values, color='salmon')
-        plt.ylabel('均方根误差 (RMSE)')
-        plt.title('均方根误差比较')
+        plt.ylabel(get_label('ylabel_rmse'))
+        plt.title(get_label('title_rmse_comparison'))
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y')
         
         # R²比较
         plt.subplot(3, 1, 3)
         plt.bar(models, r2_values, color='lightgreen')
-        plt.ylabel('R² 分数')
-        plt.title('R² 分数比较')
+        plt.ylabel(get_label('ylabel_r2'))
+        plt.title(get_label('title_r2_comparison'))
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y')
         
@@ -1053,13 +1163,14 @@ class Visualizer:
     @staticmethod
     def plot_feature_importance(importance_df, top_n=15, filename='result/feature_importance.png'):
         """
-        绘制特征重要性
+        绘制特征重要性图
         
         Args:
-            importance_df: 特征重要性数据帧
+            importance_df: 特征重要性数据框
             top_n: 显示前N个特征
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         if importance_df is None or importance_df.empty:
             print("无特征重要性数据可供绘制。")
             return
@@ -1070,8 +1181,8 @@ class Visualizer:
         plt.figure(figsize=(12, 8))
         
         plt.barh(top_features['Feature'], top_features['Importance'], color='teal')
-        plt.xlabel('重要性')
-        plt.title(f'前 {top_n} 特征重要性')
+        plt.xlabel(get_label('ylabel_importance'))
+        plt.title(get_label('title_feature_importance'))
         plt.gca().invert_yaxis() # 让最重要的特征在顶部
         plt.grid(axis='x')
         
@@ -1091,11 +1202,12 @@ class Visualizer:
             model_names: 模型名称列表
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         plt.figure(figsize=(10, 6))
         
         plt.bar(model_names, expert_weights, color='purple')
-        plt.ylabel('权重')
-        plt.title('专家模型权重')
+        plt.ylabel(get_label('ylabel_weight'))
+        plt.title(get_label('title_expert_weights'))
         plt.xticks(rotation=45, ha='right')
         plt.grid(axis='y')
         
@@ -1115,6 +1227,7 @@ class Visualizer:
             top_cities: 显示前N个城市
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         # 获取最近年份的前N个高房价城市
         latest_year = data['年份'].max()
         top_city_data = data[data['年份'] == latest_year].nlargest(top_cities, '价格')
@@ -1130,9 +1243,9 @@ class Visualizer:
             city_data = trend_data[trend_data['城市'] == city].sort_values('年份')
             plt.plot(city_data['年份'], city_data['价格'], marker='o', linewidth=2, label=city)
         
-        plt.xlabel('年份')
-        plt.ylabel('价格')
-        plt.title(f'前 {top_cities} 个城市价格趋势')
+        plt.xlabel(get_label('xlabel_year'))
+        plt.ylabel(get_label('ylabel_price'))
+        plt.title(get_label('title_price_trends'))
         plt.legend()
         plt.grid(True)
         
@@ -1152,6 +1265,7 @@ class Visualizer:
             year: 年份
             filename: 保存文件名 (默认保存在 result 文件夹下)
         """
+        filename = get_filename(filename)  # 根据语言调整文件路径
         # 筛选指定年份的数据
         year_data = data[data['年份'] == year]
         
@@ -1180,10 +1294,10 @@ class Visualizer:
                 ha='center'
             )
         
-        plt.colorbar(scatter, label='价格')
-        plt.xlabel('经度')
-        plt.ylabel('纬度')
-        plt.title(f'{year} 年房价地理分布')
+        plt.colorbar(scatter, label=get_label('colorbar_price'))
+        plt.xlabel(get_label('xlabel_longitude'))
+        plt.ylabel(get_label('ylabel_latitude'))
+        plt.title(get_label('title_geographic_prices'))
         plt.grid(True)
         
         plt.tight_layout()
@@ -1358,7 +1472,7 @@ def train_full_pipeline():
     # 绘制特征重要性 (使用新的特征名)
     feature_importance = traditional_models.get_feature_importance(best_model_name, feature_names_enhanced)
     if feature_importance is not None:
-        Visualizer.plot_feature_importance(feature_importance, filename='result/best_traditional_feature_importance_enhanced.png')
+        Visualizer.plot_feature_importance(feature_importance, filename=get_filename('result/best_traditional_feature_importance_enhanced.png'))
 
     # 7. 训练混合专家模型 (使用增强特征)
     print("\n训练混合专家模型 (使用增强特征)...")
@@ -1376,11 +1490,11 @@ def train_full_pipeline():
     print(f"混合专家模型 - MAE: {mae:.4f}, RMSE: {rmse:.4f}, R2: {r2:.4f}")
 
     # 绘制预测对比 (MoE 和 最佳传统模型)
-    Visualizer.plot_predictions(y_test, moe_predictions, "混合专家模型预测 (增强特征)", filename='result/moe_model_predictions_enhanced.png')
-    Visualizer.plot_predictions(y_test, best_model_result['predictions'], f"{best_model_name}预测 (增强特征)", filename='result/best_traditional_model_predictions_enhanced.png')
+    Visualizer.plot_predictions(y_test, moe_predictions, "混合专家模型预测 (增强特征)", filename=get_filename('result/moe_model_predictions_enhanced.png'))
+    Visualizer.plot_predictions(y_test, best_model_result['predictions'], f"{best_model_name}预测 (增强特征)", filename=get_filename('result/best_traditional_model_predictions_enhanced.png'))
 
     # 绘制专家权重分布
-    Visualizer.plot_expert_weights(expert_weights, moe_model.get_model_names(), filename='result/expert_weights.png')
+    Visualizer.plot_expert_weights(expert_weights, moe_model.get_model_names(), filename=get_filename('result/expert_weights.png'))
 
     # 9. 模型比较
     print("\n模型比较...")
@@ -1389,13 +1503,13 @@ def train_full_pipeline():
         'rmse': rmse,
         'r2': r2
     }}
-    Visualizer.plot_model_comparison(all_results, filename='result/model_comparison_enhanced.png')
+    Visualizer.plot_model_comparison(all_results, filename=get_filename('result/model_comparison_enhanced.png'))
 
     # 10. 额外可视化 (使用 data_processor.processed_data)
     print("\n创建额外可视化...")
-    Visualizer.plot_price_trends(data_processor.processed_data, filename='result/price_trends.png')
+    Visualizer.plot_price_trends(data_processor.processed_data, filename=get_filename('result/price_trends.png'))
     latest_year = data_processor.processed_data['年份'].max()
-    Visualizer.plot_geographic_prices(data_processor.processed_data, latest_year, filename=f'result/geographic_prices_{latest_year}.png')
+    Visualizer.plot_geographic_prices(data_processor.processed_data, latest_year, filename=get_filename(f'result/geographic_prices_{latest_year}.png'))
 
     print("\n训练和评估完成！")
 
@@ -1416,7 +1530,18 @@ def train_full_pipeline():
 
 def main():
     """主函数"""
-    print("=== 房价预测模型：时空注意力混合专家模型（简化版）===")
+    global USE_ENGLISH
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='房价预测模型 - 时空注意力混合专家模型')
+    parser.add_argument('--en', action='store_true', help='使用英文标注生成图片')
+    args = parser.parse_args()
+    
+    # 设置语言
+    if args.en:
+        USE_ENGLISH = True
+    
+    print(get_label('title_house_price_prediction'))
     print("作者: Claude AI")
     print("日期: 2025-04-15")
     print("\n")
@@ -1429,12 +1554,12 @@ def main():
     our_model_r2 = results['moe_model_results']['r2']
     improvement = (our_model_r2 - traditional_r2) / traditional_r2 * 100
     
-    print("\n=== 模型比较总结 ===")
-    print(f"最佳传统模型: {results['best_traditional_model']}, R²: {traditional_r2:.4f}")
-    print(f"我们的模型: 时空注意力混合专家模型, R²: {our_model_r2:.4f}")
-    print(f"性能提升: {improvement:.4f}%")
+    print(f"\n=== {get_label('model_summary')} ===")
+    print(get_label('best_traditional').format(results['best_traditional_model'], traditional_r2))
+    print(get_label('our_model').format(our_model_r2))
+    print(get_label('improvement').format(improvement))
     
-    print("\n完成！所有结果已保存到当前目录。")
+    print(f"\n{get_label('complete')}")
 
 
 if __name__ == "__main__":
