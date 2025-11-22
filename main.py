@@ -149,8 +149,13 @@ if not USE_ENGLISH:
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 np.random.seed(42)
 
-# 设置设备
+# 设置设备与线程数（限制以避免 macOS 下底层库崩溃）
 device = torch.device("cpu")
+try:
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
 print(f"使用设备: {device}")
 
 # 简单的图数据结构
@@ -188,8 +193,8 @@ class SimplifiedMamba(nn.Module):
         self.B_proj = nn.Linear(self.d_inner, self.d_state)
         self.C_proj = nn.Linear(d_model, self.d_state)
         
-        # 位置编码 (调整最大长度为更大值以适应可能的长序列)
-        self.pos_embedding = nn.Parameter(torch.randn(1, 100, self.d_model))  # 最大长度假设为100
+        # 位置编码 (基础长度 256，超过时在前向中零填充扩展)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 256, self.d_model))
         
         # 输出投影层
         self.out_proj = nn.Linear(self.d_inner, d_model)
@@ -204,8 +209,12 @@ class SimplifiedMamba(nn.Module):
     def forward(self, x):
         batch_size, seq_len, _ = x.shape
         
-        # 添加位置编码 (确保位置编码长度足够)
-        pos_emb = self.pos_embedding[:, :seq_len, :]
+        # 添加位置编码 (确保长度足够，超过基础长度时零填充)
+        if seq_len > self.pos_embedding.size(1):
+            pad_len = seq_len - self.pos_embedding.size(1)
+            pos_emb = F.pad(self.pos_embedding, (0, 0, 0, pad_len))[:, :seq_len, :]
+        else:
+            pos_emb = self.pos_embedding[:, :seq_len, :]
         x = x + pos_emb
         
         # 投影到更高维空间
@@ -251,7 +260,7 @@ class SimplifiedMamba(nn.Module):
 # 手动实现简化版图注意力层，替代 GATConv
 class SimpleGATLayer(nn.Module):
     """
-    简化版的图注意力层，受GAT (Graph Attention Networks) 启发
+    优化版图注意力层 - 使用矩阵运算避免嵌套循环
     """
     def __init__(self, in_features, out_features, heads=1, concat=True, dropout=0.2):
         super().__init__()
@@ -259,76 +268,64 @@ class SimpleGATLayer(nn.Module):
         self.out_features = out_features
         self.heads = heads
         self.concat = concat
-        self.dropout = dropout
-        
-        # 特征转换矩阵
-        self.W = nn.Parameter(torch.Tensor(heads, in_features, out_features))
-        
-        # 注意力参数
-        self.a = nn.Parameter(torch.Tensor(heads, 2 * out_features))
-        
-        # 初始化参数
-        nn.init.xavier_uniform_(self.W)
-        nn.init.xavier_uniform_(self.a)
-        
-        # Dropout
+
+        # 为每个 head 创建独立线性层
+        self.W = nn.ModuleList([
+            nn.Linear(in_features, out_features, bias=False) for _ in range(heads)
+        ])
+
+        # 注意力参数 (分离源和目标)
+        self.a_src = nn.ParameterList([
+            nn.Parameter(torch.Tensor(out_features, 1)) for _ in range(heads)
+        ])
+        self.a_dst = nn.ParameterList([
+            nn.Parameter(torch.Tensor(out_features, 1)) for _ in range(heads)
+        ])
+
+        # 初始化注意力参数
+        for h in range(heads):
+            nn.init.xavier_uniform_(self.a_src[h])
+            nn.init.xavier_uniform_(self.a_dst[h])
+
         self.dropout_layer = nn.Dropout(dropout)
-        
-        # LeakyReLU
         self.leakyrelu = nn.LeakyReLU(0.2)
-    
+
     def forward(self, x, adj_matrix):
         """
-        x: 节点特征矩阵 [N, in_features]
-        adj_matrix: 邻接矩阵 [N, N]
+        x: [N, in_features]
+        adj_matrix: [N, N]
         """
-        N = x.size(0)  # 节点数量
-        
-        # 对每个注意力头应用线性变换
-        x_transformed = torch.stack([torch.mm(x, self.W[h]) for h in range(self.heads)])  # [heads, N, out_features]
-        
-        # 准备注意力计算所需的节点对特征
-        a_input = torch.zeros(self.heads, N, N, 2 * self.out_features, device=x.device)
-        
-        # 对所有节点对计算注意力
+        N = x.size(0)
+        outputs = []
+
         for h in range(self.heads):
-            for i in range(N):
-                for j in range(N):
-                    if adj_matrix[i, j] > 0:  # 仅计算邻接节点的注意力
-                        a_input[h, i, j] = torch.cat([x_transformed[h, i], x_transformed[h, j]], dim=0)
-        
-        # 计算注意力系数
-        e = torch.zeros(self.heads, N, N, device=x.device)
-        for h in range(self.heads):
-            for i in range(N):
-                for j in range(N):
-                    if adj_matrix[i, j] > 0:
-                        e[h, i, j] = self.leakyrelu(torch.sum(a_input[h, i, j] * self.a[h]))
-        
-        # 应用邻接矩阵掩码
-        adj_mask = (adj_matrix == 0).unsqueeze(0).expand(self.heads, -1, -1)
-        e.masked_fill_(adj_mask, float('-inf'))
-        
-        # 对邻域内的节点应用softmax
-        attention = F.softmax(e, dim=2)  # [heads, N, N]
-        attention = self.dropout_layer(attention)  # [heads, N, N]
-        
-        # 计算每个节点的输出特征
-        h_prime = torch.zeros(self.heads, N, self.out_features, device=x.device)
-        for h in range(self.heads):
-            for i in range(N):
-                # 对邻域内的节点特征进行加权求和
-                for j in range(N):
-                    if adj_matrix[i, j] > 0:
-                        h_prime[h, i] += attention[h, i, j] * x_transformed[h, j]
-        
-        # 合并或平均多头注意力结果
+            # 线性变换 [N, out_features]
+            x_transformed = self.W[h](x)
+
+            # 计算注意力分数 (矩阵运算)
+            e_src = torch.matmul(x_transformed, self.a_src[h])  # [N, 1]
+            e_dst = torch.matmul(x_transformed, self.a_dst[h])  # [N, 1]
+
+            # 广播相加得到 [N, N]
+            e = e_src + e_dst.transpose(0, 1)
+            e = self.leakyrelu(e)
+
+            # 应用邻接矩阵掩码
+            e = e.masked_fill(adj_matrix == 0, float('-inf'))
+
+            # Softmax 归一化
+            attention = F.softmax(e, dim=1)
+            attention = self.dropout_layer(attention)
+
+            # 加权聚合特征
+            h_out = torch.matmul(attention, x_transformed)  # [N, out_features]
+            outputs.append(h_out)
+
+        # 合并多头注意力结果
         if self.concat:
-            # 在特征维度上连接
-            return h_prime.transpose(0, 1).reshape(N, self.heads * self.out_features)
+            return torch.cat(outputs, dim=1)  # [N, heads * out_features]
         else:
-            # 在多头之间取平均
-            return h_prime.mean(dim=0)
+            return torch.mean(torch.stack(outputs), dim=0)  # [N, out_features]
 
 # 生成经纬度信息
 CITY_COORDS = {
@@ -772,19 +769,25 @@ class DataProcessor:
         df_temporal = self.processed_data[['城市', '年份'] + temporal_cols].copy()
         df_temporal = df_temporal.sort_values(['城市', '年份'])
 
-        # 按城市分组，创建序列
+        # 按城市分组，创建序列（手动填充，避免 pad_sequence 潜在的底层崩溃）
         sequences = []
-        city_order = [] # 记录序列对应的城市顺序
+        city_order = []
+        max_len = 0
         for city, group in df_temporal.groupby('城市'):
-            # 填充缺失值（如果需要）
             group = group.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            sequences.append(torch.tensor(group[temporal_cols].values, dtype=torch.float))
+            seq = torch.tensor(group[temporal_cols].values, dtype=torch.float)
+            sequences.append(seq)
             city_order.append(city)
+            if seq.size(0) > max_len:
+                max_len = seq.size(0)
 
-        # 对序列进行填充，使长度一致
-        padded_sequences = pad_sequence(sequences, batch_first=True, padding_value=0.0).to(device)
+        input_dim = len(temporal_cols)
+        num_cities = len(sequences)
+        padded_sequences = torch.zeros((num_cities, max_len, input_dim), dtype=torch.float, device=device)
+        for i, seq in enumerate(sequences):
+            L = seq.size(0)
+            padded_sequences[i, :L, :] = seq.to(device)
 
-        # 创建城市到序列索引的映射
         city_to_seq_idx = {city: i for i, city in enumerate(city_order)}
 
         return padded_sequences, city_order, city_to_seq_idx
@@ -1398,7 +1401,9 @@ def train_full_pipeline():
     # 2. 准备高级模型输入
     print("\n准备时空模型输入...")
     graph_data, adj_matrix = data_processor.get_graph_data()
+    print(f"图数据准备完成: 节点数 {graph_data.x.size(0)}, 特征维度 {graph_data.x.size(1)}, 邻接矩阵 {tuple(adj_matrix.shape)}")
     temporal_sequences, city_order, city_to_seq_idx = data_processor.get_temporal_data()
+    print(f"时序数据准备完成: 序列数 {temporal_sequences.size(0)}, 序列长度 {temporal_sequences.size(1)}, 维度 {temporal_sequences.size(2)}")
 
     # 3. 初始化并运行 SpatioTemporalModel (仅特征提取，不训练)
     print("\n运行 SpatioTemporalModel 提取特征...")
@@ -1542,8 +1547,6 @@ def main():
         USE_ENGLISH = True
     
     print(get_label('title_house_price_prediction'))
-    print("作者: Claude AI")
-    print("日期: 2025-04-15")
     print("\n")
     
     # 运行完整训练流程
